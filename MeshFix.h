@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <utility>
+#include <tuple>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
@@ -78,13 +79,39 @@ struct PairPred
     }
 };
 
+using GridPos = std::tuple<int, int, int>;
+
+struct GridHash
+{
+    size_t operator()(const GridPos& p) const
+    {
+        return std::get<0>(p) * 73856093 ^ std::get<1>(p) * 19349663 ^ std::get<2>(p) * 83492791;
+    }
+};
+
+struct GridPred
+{
+    bool operator()(const GridPos& p1, const GridPos& p2) const
+    {
+        return std::get<0>(p1) == std::get<0>(p2) && std::get<1>(p1) == std::get<1>(p2) && std::get<2>(p1) == std::get<2>(p2);
+    }
+};
+
+class SpatialHashing
+{
+public:
+    SpatialHashing( float dx );
+    void Insert(const Triangle& t, const std::vector<Point_3>& points);
+    bool CheckIntersection(const Triangle& t, const std::vector<Point_3>& points) const;
+protected:
+    int GridCoord( float p ) const;
+protected:
+    float _dx;
+    std::unordered_map<GridPos, std::vector<Triangle>, GridHash, GridPred> _table;
+};
+
 std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadOBJVF( const std::string& path );
-
 std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
-
-void WriteOBJVF( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path );
-void WritePLYVF( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path, int format = 0/*0=ASCII,1=Binary,2=BinaryBigEndian*/);
-
 bool IsSmallHole( hHalfedge hh, Polyhedron& mesh, int max_num_hole_edges, float max_hole_diam);
 
 #endif

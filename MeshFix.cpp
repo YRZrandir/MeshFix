@@ -94,77 +94,6 @@ std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadPLYVF( const std::str
     return {vertices, faces};
 }
 
-void WriteOBJVF( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path )
-{
-    std::ofstream ofs(path);
-    for(auto& v : vertices)
-    {
-        ofs << "v " << v.x() << ' ' << v.y() << ' ' << v.z() << '\n';
-    }
-
-    for(auto& f : faces)
-    {
-        ofs << "f " << f[0] + 1 << "// " << f[1] + 1 << "// " << f[2] + 1<< "// \n";
-    }
-
-    ofs.close();
-}
-
-// void WritePLYVF( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path, int format/*0=ASCII,1=Binary,2=BinaryBigEndian*/)
-// {
-//     std::vector<std::array<double, 3>> ply_vertices;
-//     std::vector<std::vector<size_t>> ply_faces;
-
-//     for(int i = 0; i < vertices.size(); i++)
-//     {
-//         ply_vertices.emplace_back(vertices[i].x(), vertices[i].y(), vertices[i].z());
-//     }
-
-//     for(int i = 0; i < faces.size(); i++)
-//     {
-//         ply_faces.emplace_back( faces[i][0], faces[i][1], faces[i][2]);
-//     }
-
-//     happly::PLYData mesh;
-//     mesh.addVertexPositions(ply_vertices);
-//     mesh.addFaceIndices(ply_faces);
-
-//     switch(format)
-//     {
-//     case 0:
-//         mesh.write(path, happly::DataFormat::ASCII);
-//         break;
-//     case 1:
-//         mesh.write(path, happly::DataFormat::Binary);
-//         break;
-//     case 2:
-//         mesh.write(path, happly::DataFormat::BinaryBigEndian);
-//         break;
-//     default:
-//         mesh.write(path, happly::DataFormat::ASCII);
-//         break;
-//     }
-// }
-
-// void WriteSTLVF( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path, int format/*0=ASCII,1=Binary*/)
-// {
-//     microstl::Mesh mesh;
-//     for(int i = 0; i < faces.size(); i++)
-//     {
-//         const auto& p0 = vertices[faces[i][0]];
-//         const auto& p1 = vertices[faces[i][1]];
-//         const auto& p2 = vertices[faces[i][2]];
-//         microstl::Facet f;
-//         f.v1 = microstl::Vertex{static_cast<float>(p0.x()), static_cast<float>(p0.y()), static_cast<float>(p0.z())};
-//         f.v2 = microstl::Vertex{static_cast<float>(p1.x()), static_cast<float>(p1.y()), static_cast<float>(p1.z())};
-//         f.v3 = microstl::Vertex{static_cast<float>(p2.x()), static_cast<float>(p2.y()), static_cast<float>(p2.z())};
-//         mesh.facets.push_back(f);
-//     }
-//     microstl::MeshProvider hmesh(mesh);
-//     hmesh.ascii = format == 0;
-//     microstl::Writer::writeStlFile(path, hmesh);
-// }
-
 std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
 {
     std::vector<std::pair<Triangle, bool>> faceflags;
@@ -339,6 +268,144 @@ bool IsSmallHole( hHalfedge hh, Polyhedron& mesh, int max_num_hole_edges, float 
     return true;
 }
 
+std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
+{
+    double dx = 0.f;
+    for(int i = 0; i < faces.size(); i++)
+    {
+        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][0]], vertices[faces[i][1]]));
+        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][1]], vertices[faces[i][2]]));
+        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][2]], vertices[faces[i][0]]));
+    }
+    dx = dx / 3.f / faces.size() * 2.f;
+    std::unordered_map<GridPos, std::vector<int>, GridHash, GridPred> table;
+    std::vector<int> face_flags(faces.size(), 0);
+
+    auto gridcoord = [=]( double p )->int { return std::lround(std::floor(p / dx) );};
+    auto insert = [&]( int id )
+    { 
+        const auto& f = faces[id];
+        const auto& p0 = vertices[f[0]];
+        const auto& p1 = vertices[f[1]];
+        const auto& p2 = vertices[f[2]];
+        CGAL::Triangle_3<KernelEpick> t(p0, p1, p2);
+        auto aabb = t.bbox();
+        int xmax = gridcoord(aabb.xmax());
+        int ymax = gridcoord(aabb.ymax());
+        int zmax = gridcoord(aabb.zmax());
+        int xmin = gridcoord(aabb.xmin());
+        int ymin = gridcoord(aabb.ymin());
+        int zmin = gridcoord(aabb.zmin());
+        for(int i = xmin; i <= xmax; i++)
+        {
+            for(int j = ymin; j <= ymax; j++)
+            {
+                for(int k = zmin; k <= zmax; k++)
+                {
+                    table[{i,j,k}].push_back(id);
+                }
+            }
+        }
+    };
+    auto check = [&]( int id )
+    {
+        if(face_flags[id] == 1)
+            return;
+        const auto& f = faces[id];
+        CGAL::Triangle_3<KernelEpick> t(vertices[f[0]], vertices[f[1]], vertices[f[2]]);
+        if(t.is_degenerate())
+        {
+            face_flags[id] = 1;
+            return;
+        }
+        auto aabb = t.bbox();
+        int xmax = gridcoord(aabb.xmax());
+        int ymax = gridcoord(aabb.ymax());
+        int zmax = gridcoord(aabb.zmax());
+        int xmin = gridcoord(aabb.xmin());
+        int ymin = gridcoord(aabb.ymin());
+        int zmin = gridcoord(aabb.zmin());
+        std::vector<int> faces_to_check;
+        for(int i = xmin; i <= xmax; i++)
+        {
+            for(int j = ymin; j <= ymax; j++)
+            {
+                for(int k = zmin; k <= zmax; k++)
+                {
+                    auto grid = table.find({i, j, k});
+                    if(grid != table.end())
+                    {
+                        faces_to_check.insert(faces_to_check.end(), grid->second.begin(), grid->second.end());
+                    }
+                }
+            }
+        }
+        for(int j : faces_to_check)
+        {
+            const auto& fj = faces[j];
+            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
+            if(tj.is_degenerate())
+            {
+                face_flags[j] = 1;
+                continue;
+            }
+            if(CGAL::do_intersect(tj, t))
+            {
+                face_flags[id] = 1;
+                face_flags[j] = 1;
+                return;
+            }
+        }
+    };
+    std::cout << "try insert..." << std::endl;
+    for(int i = 0; i < faces.size(); i++)
+    {
+        insert(i);
+    }
+    std::cout << "try check..." << std::endl;
+    for(int i = 0; i < faces.size(); i++)
+    {
+        check(i);
+    }
+
+    std::vector<Triangle> result;
+    for(int i = 0; i < faces.size(); i++)
+    {
+        if(face_flags[i] == 0)
+        {
+            result.push_back(faces[i]);
+        }
+    }
+    return result;
+}
+
+std::vector<Triangle> RemoveSelfIntersectionBruteforce(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
+{
+    std::vector<Triangle> result;
+    for(int i = 0; i < faces.size(); i++)
+    {
+        bool intersect = false;
+        const auto& fi = faces[i];
+        CGAL::Triangle_3<KernelEpick> ti(vertices[fi[0]], vertices[fi[1]], vertices[fi[2]]);
+        for(int j = i + 1; j < faces.size(); j++)
+        {
+            const auto& fj = faces[j];
+            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
+            if(CGAL::do_intersect(ti, tj))
+            {
+                intersect = true;
+                break;
+            }
+        }
+
+        if(!intersect)
+        {
+            result.push_back(faces[i]);
+        }
+    }
+    return result;
+}
+
 int main(int argc, char* argv[])
 {
     auto print_help_msg = []()
@@ -416,6 +483,14 @@ int main(int argc, char* argv[])
     std::vector<Triangle> faces = std::move(pair.second);
 
     auto new_faces = RemoveNonManifold(vertices, faces);
+
+    auto start_t = std::chrono::high_resolution_clock::now();
+    auto new_faces2 = RemoveSelfIntersection(vertices, new_faces);
+    std::cout << "Remove self intersection: " << new_faces2.size() << ". time=" << (std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
+    start_t = std::chrono::high_resolution_clock::now();
+    auto new_faces3 = RemoveSelfIntersectionBruteforce(vertices, new_faces);
+    std::cout << "Remove self intersection: " << new_faces3.size() << ". time=" << (std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
+
 
     std::vector<int> indices;
     for(const auto& f : new_faces )
