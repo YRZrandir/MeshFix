@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <unordered_set>
+#include <omp.h>
 #include <CGAL/Polygon_mesh_processing/border.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_hole.h>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h>
@@ -13,7 +14,6 @@
 
 #include <filesystem>
 #include <utility>
-#include <omp.h>
 #include "happly.h"
 
 namespace 
@@ -181,7 +181,7 @@ std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, co
 
     std::atomic_int nb_nm_vertices = 0;
 #pragma omp parallel for
-    for(size_t iv = 0; iv < vneighbors.size(); iv++)
+    for(int iv = 0; iv < vneighbors.size(); iv++)
     {
         auto& neighbors = vneighbors[iv];
         std::list<std::pair<size_t, size_t>> sur_edges;
@@ -282,8 +282,13 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
     std::vector<int> face_flags(faces.size(), 0);
 
     auto gridcoord = [=]( double p )->int { return std::lround(std::floor(p / dx) );};
-    auto insert = [&]( int id )
-    { 
+
+    std::cout << "try insert..." << std::endl;
+    int cnt_degenerate = 0;
+
+#pragma omp parallel for
+    for(int id = 0; id < faces.size(); id++)
+    {
         const auto& f = faces[id];
         const auto& p0 = vertices[f[0]];
         const auto& p1 = vertices[f[1]];
@@ -302,22 +307,21 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
             {
                 for(int k = zmin; k <= zmax; k++)
                 {
+#pragma omp critical
+                {
                     table[{i,j,k}].push_back(id);
+                }
                 }
             }
         }
-    };
-    auto check = [&]( int id )
+    }
+
+#pragma omp parallel for
+    for(int id = 0; id < faces.size(); id++)
     {
-        if(face_flags[id] == 1)
-            return;
         const auto& f = faces[id];
+
         CGAL::Triangle_3<KernelEpick> t(vertices[f[0]], vertices[f[1]], vertices[f[2]]);
-        if(t.is_degenerate())
-        {
-            face_flags[id] = 1;
-            return;
-        }
         auto aabb = t.bbox();
         int xmax = gridcoord(aabb.xmax());
         int ymax = gridcoord(aabb.ymax());
@@ -325,7 +329,8 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
         int xmin = gridcoord(aabb.xmin());
         int ymin = gridcoord(aabb.ymin());
         int zmin = gridcoord(aabb.zmin());
-        std::vector<int> faces_to_check;
+
+        std::unordered_set<int> faces_to_check;
         for(int i = xmin; i <= xmax; i++)
         {
             for(int j = ymin; j <= ymax; j++)
@@ -335,37 +340,27 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
                     auto grid = table.find({i, j, k});
                     if(grid != table.end())
                     {
-                        faces_to_check.insert(faces_to_check.end(), grid->second.begin(), grid->second.end());
+                        faces_to_check.insert( grid->second.begin(), grid->second.end());
                     }
                 }
             }
         }
         for(int j : faces_to_check)
         {
-            const auto& fj = faces[j];
-            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
-            if(tj.is_degenerate())
-            {
-                face_flags[j] = 1;
+            if(id == j)
                 continue;
-            }
-            if(CGAL::do_intersect(tj, t))
+            const auto& fj = faces[j];
+            if(f[0] == fj[0] || f[0] == fj[1] || f[0] == fj[2] ||
+             f[1] == fj[0] || f[1] == fj[1] || f[1] == fj[2] ||
+             f[2] == fj[0] || f[2] == fj[1] || f[2] == fj[2])
+                continue;
+            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
+            if(CGAL::do_intersect(t, tj))
             {
                 face_flags[id] = 1;
-                face_flags[j] = 1;
-                return;
+                continue;
             }
         }
-    };
-    std::cout << "try insert..." << std::endl;
-    for(int i = 0; i < faces.size(); i++)
-    {
-        insert(i);
-    }
-    std::cout << "try check..." << std::endl;
-    for(int i = 0; i < faces.size(); i++)
-    {
-        check(i);
     }
 
     std::vector<Triangle> result;
@@ -376,6 +371,25 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
             result.push_back(faces[i]);
         }
     }
+    return result;
+}
+
+std::vector<Triangle> RemoveDegenerate( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
+{
+    std::vector<Triangle> result;
+
+    for(const auto& f : faces)
+    {
+        const auto& p0 = vertices[f[0]];
+        const auto& p1 = vertices[f[1]];
+        const auto& p2 = vertices[f[2]];
+        KernelEpick::Triangle_3 t(p0, p1, p2);
+        if(!t.is_degenerate())
+        {
+            result.push_back(f);
+        }
+    }
+
     return result;
 }
 
@@ -391,7 +405,7 @@ std::vector<Triangle> RemoveSelfIntersectionBruteforce(const std::vector<Point_3
         {
             const auto& fj = faces[j];
             CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
-            if(CGAL::do_intersect(ti, tj))
+            if(KernelEpick::Do_intersect_3()(ti, tj))
             {
                 intersect = true;
                 break;
@@ -482,18 +496,16 @@ int main(int argc, char* argv[])
     std::vector<Point_3> vertices = std::move(pair.first);
     std::vector<Triangle> faces = std::move(pair.second);
 
-    auto new_faces = RemoveNonManifold(vertices, faces);
+    faces = RemoveDegenerate(vertices, faces);
 
     auto start_t = std::chrono::high_resolution_clock::now();
-    auto new_faces2 = RemoveSelfIntersection(vertices, new_faces);
-    std::cout << "Remove self intersection: " << new_faces2.size() << ". time=" << (std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
-    start_t = std::chrono::high_resolution_clock::now();
-    auto new_faces3 = RemoveSelfIntersectionBruteforce(vertices, new_faces);
-    std::cout << "Remove self intersection: " << new_faces3.size() << ". time=" << (std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
+    faces = RemoveSelfIntersection(vertices, faces);
+    std::cout << "Remove self intersection: " << faces.size() << ". time=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
 
+    faces = RemoveNonManifold(vertices, faces);
 
     std::vector<int> indices;
-    for(const auto& f : new_faces )
+    for(const auto& f : faces )
     {
         indices.push_back(f[0]);
         indices.push_back(f[1]);

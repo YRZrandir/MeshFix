@@ -111,6 +111,8 @@ protected:
 };
 
 std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadOBJVF( const std::string& path );
+std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadPLYVF( const std::string& path );
+std::vector<Triangle> RemoveDegenerate( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
 std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
 bool IsSmallHole( hHalfedge hh, Polyhedron& mesh, int max_num_hole_edges, float max_hole_diam);
 
