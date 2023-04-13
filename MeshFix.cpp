@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <unordered_set>
+#include <variant>
 #include <omp.h>
 #include <CGAL/Polygon_mesh_processing/border.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_hole.h>
@@ -277,16 +278,13 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
         dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][1]], vertices[faces[i][2]]));
         dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][2]], vertices[faces[i][0]]));
     }
-    dx = dx / 3.f / faces.size() * 2.f;
+    dx = dx / 3.f / faces.size() * 1.f;
     std::unordered_map<GridPos, std::vector<int>, GridHash, GridPred> table;
     std::vector<int> face_flags(faces.size(), 0);
 
     auto gridcoord = [=]( double p )->int { return std::lround(std::floor(p / dx) );};
 
-    std::cout << "try insert..." << std::endl;
-    int cnt_degenerate = 0;
-
-#pragma omp parallel for
+//#pragma omp parallel for num_threads(4)
     for(int id = 0; id < faces.size(); id++)
     {
         const auto& f = faces[id];
@@ -307,7 +305,7 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
             {
                 for(int k = zmin; k <= zmax; k++)
                 {
-#pragma omp critical
+//#pragma omp critical
                 {
                     table[{i,j,k}].push_back(id);
                 }
@@ -316,7 +314,7 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
         }
     }
 
-#pragma omp parallel for
+#pragma omp parallel for 
     for(int id = 0; id < faces.size(); id++)
     {
         const auto& f = faces[id];
@@ -350,15 +348,28 @@ std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertic
             if(id == j)
                 continue;
             const auto& fj = faces[j];
-            if(f[0] == fj[0] || f[0] == fj[1] || f[0] == fj[2] ||
-             f[1] == fj[0] || f[1] == fj[1] || f[1] == fj[2] ||
-             f[2] == fj[0] || f[2] == fj[1] || f[2] == fj[2])
+            int nb_shared_vtx = 0;
+            if(f[0] == fj[0] || f[0] == fj[1] || f[0] == fj[2])
+                nb_shared_vtx++;
+            if(f[1] == fj[0] || f[1] == fj[1] || f[1] == fj[2])
+                nb_shared_vtx++;
+            if(f[2] == fj[0] || f[2] == fj[1] || f[2] == fj[2])
+                nb_shared_vtx++;
+            if(nb_shared_vtx >= 2)
                 continue;
             CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
-            if(CGAL::do_intersect(t, tj))
+            auto ret = CGAL::intersection(t, tj); 
+            
+            if(nb_shared_vtx == 0 && ret.has_value() && ret->which() == 1)
+            {
+                std::cout << ret->which() << std::endl;
+                face_flags[id] = 1;
+                break;
+            }
+            else if(nb_shared_vtx == 1 && ret.has_value() && ret->which() == 1)
             {
                 face_flags[id] = 1;
-                continue;
+                break;
             }
         }
     }
@@ -514,82 +525,83 @@ int main(int argc, char* argv[])
 
     Polyhedron m( vertices, indices );
     
-    CGAL::Polygon_mesh_processing::remove_isolated_vertices(m);
+    // CGAL::Polygon_mesh_processing::remove_isolated_vertices(m);
 
-    if(fix_self_intersection)
-    {
-        std::vector<std::pair<hFacet, hFacet>> intersect_faces;
-        CGAL::Polygon_mesh_processing::self_intersections<CGAL::Parallel_if_available_tag>(m, std::back_inserter(intersect_faces));
-        std::unordered_set<hFacet> face_to_remove;
-        for(auto [f1, f2] : intersect_faces)
-        {
-            face_to_remove.insert(f1);
-            face_to_remove.insert(f2);
-        }
-        for(auto& hf : face_to_remove)
-        {
-            m.erase_facet(hf->halfedge());
-        }
+    // if(fix_self_intersection)
+    // {
+    //     std::vector<std::pair<hFacet, hFacet>> intersect_faces;
+    //     CGAL::Polygon_mesh_processing::self_intersections<CGAL::Parallel_if_available_tag>(m, std::back_inserter(intersect_faces));
+    //     std::unordered_set<hFacet> face_to_remove;
+    //     for(auto [f1, f2] : intersect_faces)
+    //     {
+    //         face_to_remove.insert(f1);
+    //         face_to_remove.insert(f2);
+    //     }
+    //     for(auto& hf : face_to_remove)
+    //     {
+    //         m.erase_facet(hf->halfedge());
+    //     }
 
-        auto [vertices1, faces1] = m.ToVerticesFaces();
-        std::vector<Triangle> triangles1;
-        for(int i = 0; i < faces1.size() / 3; i++)
-        {
-            triangles1.emplace_back(faces1[i * 3 + 0], faces1[i * 3 + 1], faces1[i * 3 + 2]);
-        }
-        auto newfaces1 = RemoveNonManifold(vertices1, triangles1);
-        std::vector<int> indices1;
-        for(const auto& f : newfaces1 )
-        {
-            indices1.push_back(f[0]);
-            indices1.push_back(f[1]);
-            indices1.push_back(f[2]);
-        }
+    //     auto [vertices1, faces1] = m.ToVerticesFaces();
+    //     std::vector<Triangle> triangles1;
+    //     for(int i = 0; i < faces1.size() / 3; i++)
+    //     {
+    //         triangles1.emplace_back(faces1[i * 3 + 0], faces1[i * 3 + 1], faces1[i * 3 + 2]);
+    //     }
+    //     auto newfaces1 = RemoveNonManifold(vertices1, triangles1);
+    //     std::vector<int> indices1;
+    //     for(const auto& f : newfaces1 )
+    //     {
+    //         indices1.push_back(f[0]);
+    //         indices1.push_back(f[1]);
+    //         indices1.push_back(f[2]);
+    //     }
         
-        m = Polyhedron(vertices1, indices1);
-    }
+    //     m = Polyhedron(vertices1, indices1);
+    // }
 
-    if(keep_largest_connected_component)
-    {
-        CGAL::Polygon_mesh_processing::keep_largest_connected_components(m, 1);
-    }
+    // if(keep_largest_connected_component)
+    // {
+    //     CGAL::Polygon_mesh_processing::keep_largest_connected_components(m, 1);
+    // }
 
-    std::vector<hHalfedge> border_edges;
-    CGAL::Polygon_mesh_processing::extract_boundary_cycles(m, std::back_inserter(border_edges));
-    for(hHalfedge hh : border_edges)
-    {
-        if(filter_small_holes)
-        {
-            if(IsSmallHole(hh, m, max_hole_edges, max_hole_diam))
-            {
-                if(refine)
-                {
-                    std::vector<hVertex> patch_vertices;
-                    std::vector<hFacet> patch_faces;
-                    CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
-                }
-                else
-                {
-                    std::vector<hFacet> patch_faces;
-                    CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
-                }
-            }
-        }
-        else
-        {
-            if(refine)
-            {
-                std::vector<hVertex> patch_vertices;
-                std::vector<hFacet> patch_faces;
-                CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
-            }
-            else
-            {
-                std::vector<hFacet> patch_faces;
-                CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
-            }
-        }
-    }
+    // std::vector<hHalfedge> border_edges;
+    // CGAL::Polygon_mesh_processing::extract_boundary_cycles(m, std::back_inserter(border_edges));
+    // for(hHalfedge hh : border_edges)
+    // {
+    //     if(filter_small_holes)
+    //     {
+    //         if(IsSmallHole(hh, m, max_hole_edges, max_hole_diam))
+    //         {
+    //             if(refine)
+    //             {
+    //                 std::vector<hVertex> patch_vertices;
+    //                 std::vector<hFacet> patch_faces;
+    //                 CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
+    //             }
+    //             else
+    //             {
+    //                 std::vector<hFacet> patch_faces;
+    //                 CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
+    //             }
+    //         }
+    //     }
+    //     else
+    //     {
+    //         if(refine)
+    //         {
+    //             std::vector<hVertex> patch_vertices;
+    //             std::vector<hFacet> patch_faces;
+    //             CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
+    //         }
+    //         else
+    //         {
+    //             std::vector<hFacet> patch_faces;
+    //             CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
+    //         }
+    //     }
+    // }
+    
     std::string out_postfix = output_path.substr(output_path.rfind('.'));
     if(out_postfix == ".ply")
         CGAL::IO::write_PLY(output_path, m);

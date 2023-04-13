@@ -97,19 +97,6 @@ struct GridPred
     }
 };
 
-class SpatialHashing
-{
-public:
-    SpatialHashing( float dx );
-    void Insert(const Triangle& t, const std::vector<Point_3>& points);
-    bool CheckIntersection(const Triangle& t, const std::vector<Point_3>& points) const;
-protected:
-    int GridCoord( float p ) const;
-protected:
-    float _dx;
-    std::unordered_map<GridPos, std::vector<Triangle>, GridHash, GridPred> _table;
-};
-
 std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadOBJVF( const std::string& path );
 std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadPLYVF( const std::string& path );
 std::vector<Triangle> RemoveDegenerate( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
