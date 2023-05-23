@@ -3,99 +3,144 @@
 #include <cctype>
 #include <list>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <unordered_set>
-#include <variant>
-#include <omp.h>
+#include <unordered_map>
+#include <utility>
+#include <assimp/Importer.hpp>
+#include <assimp/Exporter.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 #include <CGAL/Polygon_mesh_processing/border.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_hole.h>
-#include <CGAL/Polygon_mesh_processing/self_intersections.h>
-#include <CGAL/Polygon_mesh_processing/connected_components.h>
 #include <CGAL/Polygon_mesh_processing/repair.h>
-
-#include <filesystem>
-#include <utility>
-#include "happly.h"
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
+#include <omp.h>
 
 namespace 
 {
 bool gVerbose = false;
 }
-std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadOBJVF( const std::string& path )
+std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadVFAssimp( const std::string& path )
 {
-
-    std::vector<Point_3> vertices;
-    std::vector<Triangle> faces;
-
-    std::ifstream ifs(path);
-    if(!ifs.is_open())
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_PP_RVC_FLAGS, aiComponent_COLORS | aiComponent_NORMALS | aiComponent_TEXCOORDS );
+    const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_RemoveComponent);
+    if(!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode || scene->mNumMeshes < 1)
     {
-        std::cerr << "Cannot open file: " << path << std::endl;
+        std::cout << "Input invalid." << std::endl;
         exit(-1);
     }
-    std::string buf;
-    while(std::getline(ifs, buf))
-    {
-        auto pos = std::find_if_not(buf.begin(), buf.end(), [](char c){ return c == ' '; });
-        if(pos == buf.end())
-            continue;
-        if(*pos == 'v' && *std::next(pos) == ' ')
-        {
-            std::stringstream ss(buf);
-            ss.seekg(2);
-            float pos[3];
-            ss >> pos[0] >> pos[1] >> pos[2];
-            vertices.emplace_back(pos[0], pos[1], pos[2]);
-        }
-        else if (*pos == 'f')
-        {
-            std::stringstream ss(buf);
-            ss.seekg(2);
-            size_t idx[3];
-            ss >> idx[0];
-            ss.ignore(9999, ' ');
-            ss >> idx[1];
-            ss.ignore(9999, ' ');
-            ss >> idx[2];
-            faces.emplace_back(idx[0] - 1, idx[1] - 1, idx[2] - 1);
-        }
-    }
+    const aiMesh* mesh = scene->mMeshes[0];
 
-    if(gVerbose)
-    {
-        std::cout << "Load " << vertices.size() << " vertices," << faces.size() << " faces" << std::endl;
-    }
+    auto to_cgal = [](const aiVector3D& v) { return Point_3{v.x, v.y, v.z};};
 
-    return {vertices, faces};
-}
-
-std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadPLYVF( const std::string& path )
-{
-    happly::PLYData mesh(path);
-    std::vector<std::array<double, 3>> ply_vertices = mesh.getVertexPositions();
-    std::vector<std::vector<size_t>> ply_faces = mesh.getFaceIndices<size_t>();
     std::vector<Point_3> vertices;
+    for(int i = 0; i < mesh->mNumVertices; i++)
+    {
+        vertices.push_back(to_cgal(mesh->mVertices[i]));
+    }
+
     std::vector<Triangle> faces;
-
-    for(const auto& v : ply_vertices)
+    for(int i = 0; i < mesh->mNumFaces; i++)
     {
-        vertices.emplace_back(v[0], v[1], v[2]);
+        const auto& f = mesh->mFaces[i];
+        faces.emplace_back(f.mIndices[0], f.mIndices[1], f.mIndices[2]);
     }
-
-    for(const auto& f : ply_faces)
-    {
-        faces.emplace_back(f[0], f[1], f[2]);
-    }
-
     if(gVerbose)
     {
-        std::cout << "Load " << vertices.size() << " vertices," << faces.size() << " faces" << std::endl;
+        std::cout << "Loading " << vertices.size() << " vertices, " << faces.size() << " faces. " << std::endl;
     }
-    
     return {vertices, faces};
 }
 
-std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
+void WriteVFAssimp( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path)
+{
+    Assimp::Exporter exporter;
+    auto scene = std::make_unique<aiScene>();
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned[1];
+    scene->mRootNode->mMeshes[0] = 0;
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial*[]{ new aiMaterial() };
+    scene->mMetaData = new aiMetadata();
+
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh*[1];
+    scene->mMeshes[0] = new aiMesh();
+
+    aiMesh* m = scene->mMeshes[0];
+    m->mNumFaces = faces.size();
+    m->mNumVertices = vertices.size();
+    m->mVertices = new aiVector3D[m->mNumVertices];
+    m->mFaces = new aiFace[m->mNumFaces];
+    m->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+
+    for(int i = 0; i < m->mNumVertices; i++)
+    {
+        m->mVertices[i] = aiVector3D(vertices[i].x(), vertices[i].y(), vertices[i].z());
+        
+    }
+
+    for(int i = 0; i < m->mNumFaces; i++)
+    {
+        m->mFaces[i].mNumIndices = 3;
+        m->mFaces[i].mIndices = new unsigned int[3];
+        m->mFaces[i].mIndices[0] = faces[i][0];
+        m->mFaces[i].mIndices[1] = faces[i][1];
+        m->mFaces[i].mIndices[2] = faces[i][2];
+    }
+
+    std::string postfix = path.substr(path.rfind('.') + 1);
+    
+    if(postfix == std::string("ply"))
+    {
+        postfix = "plyb";
+    }
+    else if (postfix == std::string("stl"))
+    {
+        postfix = "stlb";
+    }
+    //Assimp::ExportProperties prop;
+    exporter.Export(scene.get(), postfix, path);
+}
+
+void WriteCgalPolyAssimp( const Polyhedron& m, const std::string& path )
+{
+    auto [vertices, faces] = PolyhedronToVF( m );
+    WriteVFAssimp(vertices, faces, path);
+}
+
+std::pair<std::vector<Point_3>, std::vector<Triangle>> PolyhedronToVF( const Polyhedron& m )
+{
+    std::vector<Point_3> vertices;
+
+    std::unordered_map<hVertex, unsigned> idmap;
+    int count = 0;
+    for(auto hv : CGAL::vertices(m))
+    {
+        idmap[hv] = count;
+        vertices.push_back(hv->point());
+        count++; 
+    }
+
+    std::vector<Triangle> triangles;
+    for(auto hf : CGAL::faces(m))
+    {
+        unsigned i0 = idmap[hf->halfedge()->vertex()];
+        unsigned i1 = idmap[hf->halfedge()->next()->vertex()];
+        unsigned i2 = idmap[hf->halfedge()->prev()->vertex()];
+        triangles.emplace_back(i0, i1, i2);
+    }
+
+    return {vertices, triangles};
+}
+
+std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, int* nb_removed_face )
 {
     std::vector<std::pair<Triangle, bool>> faceflags;
     for(auto& f : faces)
@@ -248,6 +293,7 @@ std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, co
         std::cout << "Find " << nb_nm_edges << " non-manifold edges and " << nb_nm_vertices << " non-manifold vertices." << std::endl;
         std::cout << "After remove non-manifold: " << result_faces.size() << " faces." << std::endl;
     }
+    *nb_removed_face = faces.size() - result_faces.size();
     return result_faces;
 }
 
@@ -269,166 +315,135 @@ bool IsSmallHole( hHalfedge hh, Polyhedron& mesh, int max_num_hole_edges, float 
     return true;
 }
 
-std::vector<Triangle> RemoveSelfIntersection( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
+void Run(
+    std::string path,
+    std::string output_path, 
+    bool keep_largest_connected_component,
+    int large_cc_threshold,
+    bool fix_self_intersection,
+    bool filter_small_holes,
+    int max_hole_edges,
+    float max_hole_diam,
+    bool refine,
+    int max_retry)
 {
-    double dx = 0.f;
-    for(int i = 0; i < faces.size(); i++)
-    {
-        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][0]], vertices[faces[i][1]]));
-        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][1]], vertices[faces[i][2]]));
-        dx += std::sqrt(CGAL::squared_distance(vertices[faces[i][2]], vertices[faces[i][0]]));
-    }
-    dx = dx / 3.f / faces.size() * 1.f;
-    std::unordered_map<GridPos, std::vector<int>, GridHash, GridPred> table;
-    std::vector<int> face_flags(faces.size(), 0);
+    auto [vertices, faces] = LoadVFAssimp(path);
 
-    auto gridcoord = [=]( double p )->int { return std::lround(std::floor(p / dx) );};
-
-//#pragma omp parallel for num_threads(4)
-    for(int id = 0; id < faces.size(); id++)
+    int nb_removed_faces = 0;
+    int cnt = 0;
+    do
     {
-        const auto& f = faces[id];
-        const auto& p0 = vertices[f[0]];
-        const auto& p1 = vertices[f[1]];
-        const auto& p2 = vertices[f[2]];
-        CGAL::Triangle_3<KernelEpick> t(p0, p1, p2);
-        auto aabb = t.bbox();
-        int xmax = gridcoord(aabb.xmax());
-        int ymax = gridcoord(aabb.ymax());
-        int zmax = gridcoord(aabb.zmax());
-        int xmin = gridcoord(aabb.xmin());
-        int ymin = gridcoord(aabb.ymin());
-        int zmin = gridcoord(aabb.zmin());
-        for(int i = xmin; i <= xmax; i++)
-        {
-            for(int j = ymin; j <= ymax; j++)
-            {
-                for(int k = zmin; k <= zmax; k++)
-                {
-//#pragma omp critical
-                {
-                    table[{i,j,k}].push_back(id);
-                }
-                }
-            }
-        }
+        faces = RemoveNonManifold(vertices, faces, &nb_removed_faces);
+        if(cnt++ > max_retry)
+            break;
+    } while (nb_removed_faces != 0);
+
+    std::vector<int> indices;
+    for(const auto& f : faces )
+    {
+        indices.push_back(f[0]);
+        indices.push_back(f[1]);
+        indices.push_back(f[2]);
     }
 
-#pragma omp parallel for 
-    for(int id = 0; id < faces.size(); id++)
+    Polyhedron m( vertices, indices );
+    
+    CGAL::Polygon_mesh_processing::remove_isolated_vertices(m);
+
+    if(fix_self_intersection)
     {
-        const auto& f = faces[id];
-
-        CGAL::Triangle_3<KernelEpick> t(vertices[f[0]], vertices[f[1]], vertices[f[2]]);
-        auto aabb = t.bbox();
-        int xmax = gridcoord(aabb.xmax());
-        int ymax = gridcoord(aabb.ymax());
-        int zmax = gridcoord(aabb.zmax());
-        int xmin = gridcoord(aabb.xmin());
-        int ymin = gridcoord(aabb.ymin());
-        int zmin = gridcoord(aabb.zmin());
-
-        std::unordered_set<int> faces_to_check;
-        for(int i = xmin; i <= xmax; i++)
+        std::vector<std::pair<hFacet, hFacet>> intersect_faces;
+        CGAL::Polygon_mesh_processing::self_intersections<CGAL::Parallel_if_available_tag>(m, std::back_inserter(intersect_faces));
+        std::unordered_set<hFacet> face_to_remove;
+        for(auto [f1, f2] : intersect_faces)
         {
-            for(int j = ymin; j <= ymax; j++)
-            {
-                for(int k = zmin; k <= zmax; k++)
-                {
-                    auto grid = table.find({i, j, k});
-                    if(grid != table.end())
-                    {
-                        faces_to_check.insert( grid->second.begin(), grid->second.end());
-                    }
-                }
-            }
+            face_to_remove.insert(f1);  
+            face_to_remove.insert(f2);
         }
-        for(int j : faces_to_check)
+        for(auto& hf : face_to_remove)
         {
-            if(id == j)
-                continue;
-            const auto& fj = faces[j];
-            int nb_shared_vtx = 0;
-            if(f[0] == fj[0] || f[0] == fj[1] || f[0] == fj[2])
-                nb_shared_vtx++;
-            if(f[1] == fj[0] || f[1] == fj[1] || f[1] == fj[2])
-                nb_shared_vtx++;
-            if(f[2] == fj[0] || f[2] == fj[1] || f[2] == fj[2])
-                nb_shared_vtx++;
-            if(nb_shared_vtx >= 2)
-                continue;
-            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
-            auto ret = CGAL::intersection(t, tj); 
-            
-            if(nb_shared_vtx == 0 && ret.has_value() && ret->which() == 1)
-            {
-                std::cout << ret->which() << std::endl;
-                face_flags[id] = 1;
+            m.erase_facet(hf->halfedge());
+        }
+
+        auto [vertices1, faces1] = m.ToVerticesFaces();
+        std::vector<Triangle> triangles1;
+        for(int i = 0; i < faces1.size() / 3; i++)
+        {
+            triangles1.emplace_back(faces1[i * 3 + 0], faces1[i * 3 + 1], faces1[i * 3 + 2]);
+        }
+        nb_removed_faces = 0;
+        int cnt = 0;
+        do
+        {
+            triangles1 = RemoveNonManifold(vertices1, triangles1, &nb_removed_faces);
+            if(cnt++ > max_retry)
                 break;
-            }
-            else if(nb_shared_vtx == 1 && ret.has_value() && ret->which() == 1)
+        } while(nb_removed_faces != 0);
+
+        std::vector<int> indices1;
+        for(const auto& f : triangles1 )
+        {
+            indices1.push_back(f[0]);
+            indices1.push_back(f[1]);
+            indices1.push_back(f[2]);
+        }
+        
+        m = Polyhedron(vertices1, indices1);
+    }
+
+    if(keep_largest_connected_component)
+    {
+        int num = CGAL::Polygon_mesh_processing::keep_large_connected_components(m, large_cc_threshold);
+        if(gVerbose)
+        {
+            std::cout << "Remove " << num << " small connected components." << std::endl;
+        }
+    }
+
+    std::vector<hHalfedge> border_edges;
+    CGAL::Polygon_mesh_processing::extract_boundary_cycles(m, std::back_inserter(border_edges));
+    for(hHalfedge hh : border_edges)
+    {
+        if(filter_small_holes)
+        {
+            if(IsSmallHole(hh, m, max_hole_edges, max_hole_diam))
             {
-                face_flags[id] = 1;
-                break;
+                if(refine)
+                {
+                    std::vector<hVertex> patch_vertices;
+                    std::vector<hFacet> patch_faces;
+                    CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
+                }
+                else
+                {
+                    std::vector<hFacet> patch_faces;
+                    CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
+                }
             }
         }
-    }
-
-    std::vector<Triangle> result;
-    for(int i = 0; i < faces.size(); i++)
-    {
-        if(face_flags[i] == 0)
+        else
         {
-            result.push_back(faces[i]);
-        }
-    }
-    return result;
-}
-
-std::vector<Triangle> RemoveDegenerate( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
-{
-    std::vector<Triangle> result;
-
-    for(const auto& f : faces)
-    {
-        const auto& p0 = vertices[f[0]];
-        const auto& p1 = vertices[f[1]];
-        const auto& p2 = vertices[f[2]];
-        KernelEpick::Triangle_3 t(p0, p1, p2);
-        if(!t.is_degenerate())
-        {
-            result.push_back(f);
-        }
-    }
-
-    return result;
-}
-
-std::vector<Triangle> RemoveSelfIntersectionBruteforce(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces)
-{
-    std::vector<Triangle> result;
-    for(int i = 0; i < faces.size(); i++)
-    {
-        bool intersect = false;
-        const auto& fi = faces[i];
-        CGAL::Triangle_3<KernelEpick> ti(vertices[fi[0]], vertices[fi[1]], vertices[fi[2]]);
-        for(int j = i + 1; j < faces.size(); j++)
-        {
-            const auto& fj = faces[j];
-            CGAL::Triangle_3<KernelEpick> tj(vertices[fj[0]], vertices[fj[1]], vertices[fj[2]]);
-            if(KernelEpick::Do_intersect_3()(ti, tj))
+            if(refine)
             {
-                intersect = true;
-                break;
+                std::vector<hVertex> patch_vertices;
+                std::vector<hFacet> patch_faces;
+                CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
+            }
+            else
+            {
+                std::vector<hFacet> patch_faces;
+                CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
             }
         }
-
-        if(!intersect)
-        {
-            result.push_back(faces[i]);
-        }
     }
-    return result;
+
+    auto [cgal_vertices, cgal_faces] = PolyhedronToVF(m);
+    WriteVFAssimp(cgal_vertices, cgal_faces, output_path);
+
+    if(gVerbose)
+    {
+        std::cout << "Output " << m.size_of_vertices() << " vertices," << m.size_of_facets() << " faces" << std::endl;
+    }
 }
 
 int main(int argc, char* argv[])
@@ -436,13 +451,14 @@ int main(int argc, char* argv[])
     auto print_help_msg = []()
     {
         std::cout << "usage:\n"
-        "\t-i filename \tPath to input mesh. OBJ format only.\n"
-        "\t-o filename \tFile name of output mesh. OBJ format only.\n"
-        "\t-k \tKeep largest connected component (default=off)\n"
+        "\t-i filename \tPath to input mesh.\n"
+        "\t-o filename \tFile name of output mesh.\n"
+        "\t-k threshold\tDelete connected components smaller than threshold (default=off)\n"
         "\t-s \tFix self intersection\n"
-        "\t-f max_hole_edges max_hole_diam\t Do not fill big holes that satisfiy (edge number > max_hole_edges) or (bounding box size > max_hole_diam)\n"
-        "\t-r refine holes.\n"
-        "\t-v \tPrint debug messages (default=off)" << std::endl;
+        "\t-f max_hole_edges max_hole_diam\t Do not fill holes that satisfiy (edge number > max_hole_edges) OR (AABB size > max_hole_diam)\n"
+        "\t-r refine after filling holes.\n"
+        "\t-m max_retry The program will repeatedly try to fix the mesh, this is the max retry time. (default=10)"
+        "\t-v \tPrint debug messages" << std::endl;
     };
     if(argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)
     {
@@ -452,11 +468,13 @@ int main(int argc, char* argv[])
     std::string path;
     std::string output_path;
     bool keep_largest_connected_component = false;
+    int large_cc_threshold = 100;
     bool fix_self_intersection = false;
     bool filter_small_holes = false;
     int max_hole_edges = std::numeric_limits<int>::max();
     float max_hole_diam = std::numeric_limits<float>::max();
     bool refine = false;
+    int max_retry = 10;
 
     for(int i = 1; i < argc; i++)
     {
@@ -475,6 +493,10 @@ int main(int argc, char* argv[])
         else if (strcmp(argv[i], "-k") == 0)
         {
             keep_largest_connected_component = true;
+            if(i < argc - 1 && std::atoi(argv[i+1]) != 0)
+            {
+                large_cc_threshold = std::atoi(argv[i + 1]);
+            }
         }
         else if (strcmp(argv[i], "-s") == 0)
         {
@@ -486,6 +508,14 @@ int main(int argc, char* argv[])
             max_hole_edges = std::atoi(argv[i+1]);
             max_hole_diam = std::atof(argv[i+2]);
         }
+        else if (strcmp(argv[i], "-r") == 0)
+        {
+            refine = true;
+        }
+        else if (strcmp(argv[i], "-m") == 0)
+        {
+            max_retry = std::atoi(argv[i+1]);
+        }
     }
     if(path.empty() || output_path.empty())
     {
@@ -493,126 +523,18 @@ int main(int argc, char* argv[])
         return -1;
     }
     
-    std::string postfix = path.substr(path.rfind('.'));
-    std::pair<std::vector<Point_3>, std::vector<Triangle>> pair;
-    if(postfix == ".obj")
-        pair = LoadOBJVF(path);
-    else if (postfix == ".ply")
-        pair = LoadPLYVF(path);
-    else
-    {
-        print_help_msg();
-        return -1;
-    }
-    std::vector<Point_3> vertices = std::move(pair.first);
-    std::vector<Triangle> faces = std::move(pair.second);
-
-    faces = RemoveDegenerate(vertices, faces);
-
-    auto start_t = std::chrono::high_resolution_clock::now();
-    faces = RemoveSelfIntersection(vertices, faces);
-    std::cout << "Remove self intersection: " << faces.size() << ". time=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_t).count() << std::endl;
-
-    faces = RemoveNonManifold(vertices, faces);
-
-    std::vector<int> indices;
-    for(const auto& f : faces )
-    {
-        indices.push_back(f[0]);
-        indices.push_back(f[1]);
-        indices.push_back(f[2]);
-    }
-
-    Polyhedron m( vertices, indices );
+    Run( 
+        path,
+        output_path,
+        keep_largest_connected_component,
+        large_cc_threshold,
+        fix_self_intersection, 
+        filter_small_holes, 
+        max_hole_edges, 
+        max_hole_diam, 
+        refine,
+        max_retry
+    );
     
-    // CGAL::Polygon_mesh_processing::remove_isolated_vertices(m);
-
-    // if(fix_self_intersection)
-    // {
-    //     std::vector<std::pair<hFacet, hFacet>> intersect_faces;
-    //     CGAL::Polygon_mesh_processing::self_intersections<CGAL::Parallel_if_available_tag>(m, std::back_inserter(intersect_faces));
-    //     std::unordered_set<hFacet> face_to_remove;
-    //     for(auto [f1, f2] : intersect_faces)
-    //     {
-    //         face_to_remove.insert(f1);
-    //         face_to_remove.insert(f2);
-    //     }
-    //     for(auto& hf : face_to_remove)
-    //     {
-    //         m.erase_facet(hf->halfedge());
-    //     }
-
-    //     auto [vertices1, faces1] = m.ToVerticesFaces();
-    //     std::vector<Triangle> triangles1;
-    //     for(int i = 0; i < faces1.size() / 3; i++)
-    //     {
-    //         triangles1.emplace_back(faces1[i * 3 + 0], faces1[i * 3 + 1], faces1[i * 3 + 2]);
-    //     }
-    //     auto newfaces1 = RemoveNonManifold(vertices1, triangles1);
-    //     std::vector<int> indices1;
-    //     for(const auto& f : newfaces1 )
-    //     {
-    //         indices1.push_back(f[0]);
-    //         indices1.push_back(f[1]);
-    //         indices1.push_back(f[2]);
-    //     }
-        
-    //     m = Polyhedron(vertices1, indices1);
-    // }
-
-    // if(keep_largest_connected_component)
-    // {
-    //     CGAL::Polygon_mesh_processing::keep_largest_connected_components(m, 1);
-    // }
-
-    // std::vector<hHalfedge> border_edges;
-    // CGAL::Polygon_mesh_processing::extract_boundary_cycles(m, std::back_inserter(border_edges));
-    // for(hHalfedge hh : border_edges)
-    // {
-    //     if(filter_small_holes)
-    //     {
-    //         if(IsSmallHole(hh, m, max_hole_edges, max_hole_diam))
-    //         {
-    //             if(refine)
-    //             {
-    //                 std::vector<hVertex> patch_vertices;
-    //                 std::vector<hFacet> patch_faces;
-    //                 CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
-    //             }
-    //             else
-    //             {
-    //                 std::vector<hFacet> patch_faces;
-    //                 CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
-    //             }
-    //         }
-    //     }
-    //     else
-    //     {
-    //         if(refine)
-    //         {
-    //             std::vector<hVertex> patch_vertices;
-    //             std::vector<hFacet> patch_faces;
-    //             CGAL::Polygon_mesh_processing::triangulate_and_refine_hole(m, hh, std::back_inserter(patch_faces), std::back_inserter(patch_vertices));
-    //         }
-    //         else
-    //         {
-    //             std::vector<hFacet> patch_faces;
-    //             CGAL::Polygon_mesh_processing::triangulate_hole(m, hh, std::back_inserter(patch_faces));
-    //         }
-    //     }
-    // }
-    
-    std::string out_postfix = output_path.substr(output_path.rfind('.'));
-    if(out_postfix == ".ply")
-        CGAL::IO::write_PLY(output_path, m);
-    else if (out_postfix == ".stl")
-        CGAL::IO::write_STL(output_path, m, CGAL::parameters::use_binary_mode(true));
-    else
-        CGAL::IO::write_OBJ(output_path, m, CGAL::parameters::use_binary_mode(true));
-
-    if(gVerbose)
-    {
-        std::cout << "Output " << m.size_of_vertices() << " vertices," << m.size_of_facets() << " faces" << std::endl;
-    }
     return 0;
 }

@@ -3,7 +3,6 @@
 #include <functional>
 #include <string>
 #include <utility>
-#include <tuple>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
@@ -79,28 +78,12 @@ struct PairPred
     }
 };
 
-using GridPos = std::tuple<int, int, int>;
 
-struct GridHash
-{
-    size_t operator()(const GridPos& p) const
-    {
-        return std::get<0>(p) * 73856093 ^ std::get<1>(p) * 19349663 ^ std::get<2>(p) * 83492791;
-    }
-};
-
-struct GridPred
-{
-    bool operator()(const GridPos& p1, const GridPos& p2) const
-    {
-        return std::get<0>(p1) == std::get<0>(p2) && std::get<1>(p1) == std::get<1>(p2) && std::get<2>(p1) == std::get<2>(p2);
-    }
-};
-
-std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadOBJVF( const std::string& path );
-std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadPLYVF( const std::string& path );
-std::vector<Triangle> RemoveDegenerate( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
-std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces);
+std::vector<Triangle> RemoveNonManifold(const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, int* nb_removed_face = nullptr);
+std::pair<std::vector<Point_3>, std::vector<Triangle>> LoadVFAssimp( const std::string& path );
+void WriteVFAssimp( const std::vector<Point_3>& vertices, const std::vector<Triangle>& faces, const std::string& path);
+void WriteCgalPolyAssimp( const Polyhedron& m, const std::string& path );
+std::pair<std::vector<Point_3>, std::vector<Triangle>> PolyhedronToVF( const Polyhedron& m );
 bool IsSmallHole( hHalfedge hh, Polyhedron& mesh, int max_num_hole_edges, float max_hole_diam);
 
 #endif
